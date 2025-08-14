@@ -54,7 +54,49 @@
 # 指定目标目录和分支
 ./deploy.sh -t /path/to/target -b feature/new-ui
 ```
+```
+=====================================================================================
 
+   ____ _ _        _____ _ _            ____             _
+  / ___(_) |_     |  ___(_) | ___      |  _ \  ___ _ __ | | ___  _   _  ___ _ __
+ | |  _| | __|____| |_  | | |/ _ \_____| | | |/ _ \ '_ \| |/ _ \| | | |/ _ \ '__|
+ | |_| | | ||_____|  _| | | |  __/_____| |_| |  __/ |_) | | (_) | |_| |  __/ |
+  \____|_|\__|    |_|   |_|_|\___|     |____/ \___| .__/|_|\___/ \__, |\___|_|
+                                                  |_|            |___/
+    
+=====================================================================================
+用法: deploy-v2.sh [选项]
+
+选项:
+  -h                  显示此帮助信息
+  -v                  详细模式，显示更多部署过程信息
+  -t <target_dir>     设置目标部署目录 (默认: /www/wwwroot/test.hctx.cc)
+  -r <git_repo>       设置Git仓库地址 (默认: git@codeup.aliyun.com:685f785033ca8867a43522e6/gysx/gysx-server-v2.git)
+  -w <deploy_dir>     设置部署工作目录，基于此目录和分支名自动设置缓存、备份等路径
+  -c <git_cache>      设置Git缓存目录 (默认: 基于部署工作目录或 /www/wwwroot/deploy/deploy/master/cache)
+  -b <git_branch>     设置Git分支 (默认: master)
+  -d <backup_dir>     设置备份目录 (默认: 基于部署工作目录或 /www/wwwroot/deploy/deploy/master/backups)
+  -n <max_backups>    设置最大备份数量 (默认: 5)
+  -s <status_file>    设置状态文件路径 (默认: 基于部署工作目录或 /www/wwwroot/deploy/deploy/master/deploy_status)
+  -e <error_file>     设置错误详情文件路径 (默认: 基于部署工作目录或 /www/wwwroot/deploy/deploy/master/error_details)
+
+说明:
+  如果未设置部署工作目录(-w)，则默认使用脚本所在目录下的deploy目录（脚本默认路径为/www/wwwroot/gysx-server-deploy）
+  基于部署工作目录和分支名自动设置以下路径:
+    分支部署目录:    <deploy_dir>/<branch_name>
+    Git缓存目录:     <分支部署目录>/cache
+    备份目录:        <分支部署目录>/backups
+    状态文件:        <分支部署目录>/deploy_status
+    错误详情文件:    <分支部署目录>/error_details
+
+示例:
+  deploy-v2.sh                  # 使用默认配置进行部署
+  deploy-v2.sh -v               # 使用默认配置并开启详细模式进行部署
+  deploy-v2.sh -b develop       # 部署develop分支
+  deploy-v2.sh -w /path/to/deploy -b feature/new-ui  # 指定工作目录和分支
+  deploy-v2.sh -t /path/to/target -b feature/new-ui  # 指定目标目录和分支
+  deploy-v2.sh -h               # 显示此帮助信息
+```
 ## 参数说明
 
 | 参数 | 说明 | 默认值 |
