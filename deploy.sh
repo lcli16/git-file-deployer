@@ -15,8 +15,8 @@ export LC_ALL=en_US.UTF-8
 git config --global core.quotepath off
 
 # 默认配置变量
-TARGET_DIR="/www/wwwroot/test.hctx.cc"  # 生产目录（无.git）
-GIT_REPO="git@codeup.aliyun.com:685f785033ca8867a43522e6/gysx/gysx-server-v2.git"       # 仓库地址
+TARGET_DIR="/www/wwwroot/project"  # 生产目录（无.git）
+GIT_REPO=".git"                           # 仓库地址
 GIT_BRANCH="master"                   # Git分支
 DEPLOY_DIR=""                         # 部署工作目录
 GIT_CACHE=""                          # Git缓存目录（基于部署工作目录）

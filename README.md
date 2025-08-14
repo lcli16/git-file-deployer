@@ -4,7 +4,8 @@
 
 <p align="center"> 
  
-  <strong>一个用于自动化部署项目的 Bash 脚本，支持 Git 仓库同步、增量更新、备份恢复等功能。</strong>
+  <strong>这是一个用于自动化部署项目的 Bash 脚本，支持 Git 仓库同步、增量更新、备份恢复等功能。主要用于同步线上项目的代码，并自动生成相应的备份和恢复方案。
+  </strong>
 </p>
 
 <p align="center">
