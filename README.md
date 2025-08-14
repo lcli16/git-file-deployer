@@ -1,8 +1,9 @@
-<p align="center">
-</p>
+<h1 align="center">
+<strong>GifFileDeployer</strong>
+</h1>
 
 <p align="center"> 
- <strong>GifFileDeployer</strong>
+ 
   <strong>一个用于自动化部署项目的 Bash 脚本，支持 Git 仓库同步、增量更新、备份恢复等功能。</strong>
 </p>
 
