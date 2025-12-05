@@ -23,13 +23,14 @@ GIT_CACHE=""                          # Git缓存目录（基于部署工作目�
 BACKUP_DIR=""                         # 备份目录（基于部署工作目录）
 MAX_BACKUPS=5                         # 保留的备份数量
 STATUS_FILE=""                        # 状态标记文件（基于部署工作目录）
-ERROR_DETAILS_FILE=""                 # 错误详情文件（基于部署工作目录)
-
+ERROR_DETAILS_FILE=""                 # 错误详情文件（基于部署工作目录）
+IGNORE_FILE=""                        # 忽略文件路径
+LOCK_FILE=""                          # 脚本锁文件路径
 
 # 解析命令行参数
 VERBOSE=false
 SHOW_HELP=false
-while getopts "hvt:r:w:b:d:n:s:e:c:" opt; do
+while getopts "hvt:r:w:b:d:n:s:e:c:i:l:" opt; do
   case $opt in
     h)
       SHOW_HELP=true
@@ -64,6 +65,12 @@ while getopts "hvt:r:w:b:d:n:s:e:c:" opt; do
     c)
       GIT_CACHE="$OPTARG"
       ;;
+    i)
+      IGNORE_FILE="$OPTARG"
+      ;;
+    l)
+      LOCK_FILE="$OPTARG"
+      ;;
     \?)
       echo "无效选项: -$OPTARG" >&2
       exit 1
@@ -87,6 +94,8 @@ GIT_CACHE="${GIT_CACHE:-${BRANCH_DEPLOY_DIR}/cache}"
 BACKUP_DIR="${BACKUP_DIR:-${BRANCH_DEPLOY_DIR}/backups}"
 STATUS_FILE="${STATUS_FILE:-${BRANCH_DEPLOY_DIR}/deploy_status}"
 ERROR_DETAILS_FILE="${ERROR_DETAILS_FILE:-${BRANCH_DEPLOY_DIR}/error_details}"
+IGNORE_FILE="${IGNORE_FILE:-${BRANCH_DEPLOY_DIR}/.deploy-ignore}"
+LOCK_FILE="${LOCK_FILE:-${BRANCH_DEPLOY_DIR}/deploy.lock}"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -169,6 +178,62 @@ validate_params() {
     fi
     
     return 0
+}
+
+# 过滤文件函数
+filter_files() {
+    local file_list="$1"
+    local filtered_list="/tmp/filtered_$$_$(basename "$file_list")"
+    
+    # 如果忽略文件不存在，则直接返回原文件列表
+    if [ ! -f "$IGNORE_FILE" ]; then
+        cp "$file_list" "$filtered_list"
+        echo "$filtered_list"
+        return 0
+    fi
+    
+    # 创建临时文件用于存储结果
+    touch "$filtered_list"
+    
+    # 逐行读取文件列表
+    while IFS= read -r file; do
+        if [ -n "$file" ]; then
+            local should_ignore=false
+            
+            # 逐行读取忽略规则
+            while IFS= read -r pattern; do
+                # 跳过空行和注释行
+                if [ -n "$pattern" ] && [[ ! "$pattern" =~ ^[[:space:]]*# ]]; then
+                    # 处理精确匹配
+                    if [ "$file" = "$pattern" ]; then
+                        should_ignore=true
+                        break
+                    fi
+                    
+                    # 处理目录匹配（目录以/结尾）
+                    if [[ "$pattern" == */ ]] && [[ "$file" == "$pattern"* ]]; then
+                        should_ignore=true
+                        break
+                    fi
+                    
+                    # 处理通配符模式（使用bash模式匹配）
+                    case "$file" in
+                        $pattern)
+                            should_ignore=true
+                            break
+                            ;;
+                    esac
+                fi
+            done < <(grep -E -v '^\s*(#|$)' "$IGNORE_FILE")
+            
+            # 如果不应该忽略该文件，则添加到过滤后的列表中
+            if [ "$should_ignore" = false ]; then
+                echo "$file" >> "$filtered_list"
+            fi
+        fi
+    done < "$file_list"
+    
+    echo "$filtered_list"
 }
 
 # 进度条配置
@@ -480,6 +545,14 @@ deploy() {
         return 1
     fi
 
+    # 应用过滤器过滤文件
+    FILTERED_CHANGED_FILES=$(filter_files "/tmp/changed_files.txt")
+    FILTERED_DELETED_FILES=$(filter_files "/tmp/deleted_files.txt")
+    
+    # 将过滤后的文件列表替换原始文件列表
+    mv "$FILTERED_CHANGED_FILES" /tmp/changed_files.txt
+    mv "$FILTERED_DELETED_FILES" /tmp/deleted_files.txt
+
     # 检查是否有变更
     if [ -s /tmp/changed_files.txt ] || [ -s /tmp/deleted_files.txt ]; then
         if [ "$VERBOSE" = true ]; then
@@ -609,6 +682,8 @@ if [ "$SHOW_HELP" = true ]; then
     echo "  -n <max_backups>    设置最大备份数量 (默认: $MAX_BACKUPS)"
     echo "  -s <status_file>    设置状态文件路径 (默认: 基于部署工作目录或 $STATUS_FILE)"
     echo "  -e <error_file>     设置错误详情文件路径 (默认: 基于部署工作目录或 $ERROR_DETAILS_FILE)"
+    echo "  -i <ignore_file>    设置忽略文件路径 (默认: 基于部署工作目录或 $IGNORE_FILE)"
+    echo "  -l <lock_file>      设置锁文件路径 (默认: 基于部署工作目录或 $LOCK_FILE)"
     echo ""
     echo "说明:"
     echo "  如果未设置部署工作目录(-w)，则默认使用脚本所在目录下的deploy目录（脚本默认路径为/www/wwwroot/gysx-server-deploy）"
@@ -618,6 +693,16 @@ if [ "$SHOW_HELP" = true ]; then
     echo "    备份目录:        <分支部署目录>/backups"
     echo "    状态文件:        <分支部署目录>/deploy_status"
     echo "    错误详情文件:    <分支部署目录>/error_details"
+    echo "    忽略文件:        <分支部署目录>/.deploy-ignore"
+    echo "    锁文件:          <分支部署目录>/deploy.lock"
+    echo ""
+    echo "忽略文件(.deploy-ignore)格式:"
+    echo "  每一行代表一个过滤规则，支持以下格式:"
+    echo "  1. 完整路径: /path/to/file.txt"
+    echo "  2. 相对路径: path/to/dir/"
+    echo "  3. 通配符模式: *.zip, *.log"
+    echo "  4. 注释: 以 # 开头的行将被忽略"
+    echo "  5. 空行: 空行将被忽略"
     echo ""
     echo "示例:"
     echo "  $0                  # 使用默认配置进行部署"
@@ -665,7 +750,27 @@ echo -e "最大备份数: ${MAX_BACKUPS}"
 echo -e "状态文件: ${STATUS_FILE}"
 echo -e "错误详情文件: ${ERROR_DETAILS_FILE}"
 echo -e "Git分支: ${GIT_BRANCH}"
+echo -e "忽略文件: ${IGNORE_FILE}"
+echo -e "锁文件: ${LOCK_FILE}"
 echo ""  # 空行，为进度条显示预留位置
+
+# 检查是否已有实例在运行
+if [ -f "$LOCK_FILE" ]; then
+    LOCK_PID=$(cat "$LOCK_FILE")
+    if ps -p "$LOCK_PID" > /dev/null 2>&1; then
+        echo -e "${RED}❌ 检测到部署脚本已在运行中 (PID: $LOCK_PID)${NC}" >&2
+        exit 1
+    else
+        # 清理无效的锁文件
+        rm -f "$LOCK_FILE"
+    fi
+fi
+
+# 创建锁文件
+echo $$ > "$LOCK_FILE"
+# 确保脚本退出时清理锁文件
+trap 'rm -f "$LOCK_FILE"' EXIT
+
 trap 'echo "failed:unexpected_error" > "$STATUS_FILE"; echo "捕获到未预期的错误" > "$ERROR_DETAILS_FILE"; echo -e "${RED}❌ 捕获到未预期的错误:${NC}" >&2; cat "$ERROR_DETAILS_FILE" >&2' ERR
 
 # 重置进度

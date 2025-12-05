@@ -1,0 +1,16 @@
+# 忽略规则示例文件
+# 每一行代表一个过滤规则
+
+/vendor/
+.env
+*.zip
+*.log
+.DS_Store
+/public/.user.ini
+/runtime/
+/application/config.php
+/addons/wanlshop/config.php
+/public/uploads/
+/database/
+/application/extra/
+/application/database.php
