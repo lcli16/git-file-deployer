@@ -312,6 +312,53 @@ verbose_echo() {
     fi
 }
 
+# 同步缺失的文件
+sync_missing_files() {
+    local missing_files_count=0
+    
+    verbose_echo "${YELLOW}🔍 检查缺失的文件...${NC}"
+    
+    # 获取仓库中的所有文件列表
+    if ! (cd "$GIT_CACHE" && find . -type f | sed 's|^./||') > /tmp/all_repo_files.txt 2>"$ERROR_DETAILS_FILE"; then
+        echo "failed:list_repo_files" > "$STATUS_FILE"
+        echo -e "${RED}❌ 获取仓库文件列表失败:${NC}" >&2
+        cat "$ERROR_DETAILS_FILE" >&2
+        return 1
+    fi
+    
+    # 过滤掉忽略的文件
+    FILTERED_ALL_FILES=$(filter_files "/tmp/all_repo_files.txt")
+    mv "$FILTERED_ALL_FILES" /tmp/all_repo_files.txt
+    
+    # 检查每个文件是否在生产环境中存在
+    while IFS= read -r file; do
+        if [ -n "$file" ]; then
+            # 如果文件在仓库中存在但在生产环境中不存在，则需要同步
+            if [ ! -f "$TARGET_DIR/$file" ]; then
+                verbose_echo "${GREEN}  ➕ 补充缺失文件: $file${NC}"
+                
+                mkdir -p "$TARGET_DIR/$(dirname "$file")" 2>/dev/null || true
+                if ! cp "$GIT_CACHE/$file" "$TARGET_DIR/$file" 2>"$ERROR_DETAILS_FILE"; then
+                    echo "failed:missing_file_copy" > "$STATUS_FILE"
+                    echo -e "${RED}❌ 同步缺失文件失败 ($file):${NC}" >&2
+                    cat "$ERROR_DETAILS_FILE" >&2
+                    return 1
+                fi
+                
+                missing_files_count=$((missing_files_count + 1))
+            fi
+        fi
+    done < /tmp/all_repo_files.txt
+    
+    if [ "$missing_files_count" -gt 0 ]; then
+        verbose_echo "${GREEN}✅ 同步了 $missing_files_count 个缺失的文件${NC}"
+    else
+        verbose_echo "${GREEN}✅ 没有发现缺失的文件${NC}"
+    fi
+    
+    return 0
+}
+
 # 递归删除空目录
 clean_empty_dirs() {
     local dir="$1"
@@ -624,6 +671,12 @@ deploy() {
             fi
         done < /tmp/deleted_files.txt
 
+        # 同步缺失的文件
+        show_progress "同步缺失文件"
+        if ! sync_missing_files; then
+            return 1
+        fi
+
         # 记录新版本
         echo "$CURRENT_HASH" > "$LAST_HASH_FILE"
         
@@ -648,6 +701,12 @@ deploy() {
         
         # 记录部署结束时间
         DEPLOY_END_TIME=$(date +%s)
+        
+        # 即使没有变更，也要检查是否有缺失的文件需要同步
+        show_progress "同步缺失文件"
+        if ! sync_missing_files; then
+            return 1
+        fi
         
         echo "no_change" > "$STATUS_FILE"
         show_progress "无变更完成"
