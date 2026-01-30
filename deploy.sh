@@ -184,55 +184,69 @@ validate_params() {
 filter_files() {
     local file_list="$1"
     local filtered_list="/tmp/filtered_$$_$(basename "$file_list")"
-    
+
     # 如果忽略文件不存在，则直接返回原文件列表
     if [ ! -f "$IGNORE_FILE" ]; then
         cp "$file_list" "$filtered_list"
         echo "$filtered_list"
         return 0
     fi
-    
+
+    # 预处理忽略规则：去注释、去空行、去除首尾空格、去除开头的 /
+    local patterns=()
+    while IFS= read -r line; do
+        patterns+=("$line")
+    done < <(grep -E -v '^\s*(#|$)' "$IGNORE_FILE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^\///')
+
+    # 添加默认忽略规则：.git 目录
+    patterns+=(".git")
+
     # 创建临时文件用于存储结果
     touch "$filtered_list"
-    
+
     # 逐行读取文件列表
     while IFS= read -r file; do
         if [ -n "$file" ]; then
+            # 解码可能存在的 Git 转义文件名
+            local decoded_file
+            decoded_file=$(decode_git_filename "$file")
+
             local should_ignore=false
-            
-            # 逐行读取忽略规则
-            while IFS= read -r pattern; do
-                # 跳过空行和注释行
-                if [ -n "$pattern" ] && [[ ! "$pattern" =~ ^[[:space:]]*# ]]; then
-                    # 处理精确匹配
-                    if [ "$file" = "$pattern" ]; then
-                        should_ignore=true
-                        break
-                    fi
-                    
-                    # 处理目录匹配（目录以/结尾）
-                    if [[ "$pattern" == */ ]] && [[ "$file" == "$pattern"* ]]; then
-                        should_ignore=true
-                        break
-                    fi
-                    
-                    # 处理通配符模式（使用bash模式匹配）
-                    case "$file" in
-                        $pattern)
-                            should_ignore=true
-                            break
-                            ;;
-                    esac
+            for pattern in "${patterns[@]}"; do
+                # 精确匹配
+                if [ "$decoded_file" = "$pattern" ]; then
+                    should_ignore=true
+                    break
                 fi
-            done < <(grep -E -v '^\s*(#|$)' "$IGNORE_FILE")
-            
+
+                # 处理目录匹配（模式以 / 结尾）
+                if [[ "$pattern" == */ ]] && [[ "$decoded_file" == "$pattern"* ]]; then
+                    should_ignore=true
+                    break
+                fi
+
+                # 处理 .git 目录及其子文件
+                if [[ "$decoded_file" == .git/* ]]; then
+                    should_ignore=true
+                    break
+                fi
+
+                # 处理通配符模式（使用 bash 模式匹配）
+                case "$decoded_file" in
+                    $pattern)
+                        should_ignore=true
+                        break
+                        ;;
+                esac
+            done
+
             # 如果不应该忽略该文件，则添加到过滤后的列表中
             if [ "$should_ignore" = false ]; then
                 echo "$file" >> "$filtered_list"
             fi
         fi
     done < "$file_list"
-    
+
     echo "$filtered_list"
 }
 
@@ -868,8 +882,7 @@ echo -e "${GREEN}结束时间: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
 
 # 返回状态码
 case "$DEPLOY_STATUS" in
-    success) exit 0 ;;
-    no_change) exit 10 ;;
+    success|no_change) exit 0 ;;
     failed:*) exit 1 ;;
     *) exit 2 ;;
 esac
