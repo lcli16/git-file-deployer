@@ -129,13 +129,19 @@ GIT_CACHE="${GIT_CACHE:-${BRANCH_DEPLOY_DIR}/cache}"
 BACKUP_DIR="${BACKUP_DIR:-${BRANCH_DEPLOY_DIR}/backups}"
 STATUS_FILE="${STATUS_FILE:-${BRANCH_DEPLOY_DIR}/deploy_status}"
 ERROR_DETAILS_FILE="${ERROR_DETAILS_FILE:-${BRANCH_DEPLOY_DIR}/error_details}"
-IGNORE_FILE="${IGNORE_FILE:-${BRANCH_DEPLOY_DIR}/.deploy-ignore}"
+if [ -z "$IGNORE_FILE" ]; then
+    if [ -f "${SCRIPT_DIR}/.deploy-ignore" ]; then
+        IGNORE_FILE="${SCRIPT_DIR}/.deploy-ignore"
+    else
+        IGNORE_FILE="${BRANCH_DEPLOY_DIR}/.deploy-ignore"
+    fi
+fi
 LOCK_FILE="${LOCK_FILE:-${BRANCH_DEPLOY_DIR}/deploy.lock}"
 LAST_HASH_FILE="${BRANCH_DEPLOY_DIR}/.last_commit"
 LEGACY_LAST_HASH_FILE="${TARGET_DIR}/.last_commit"
 IGNORE_EXACT_FILE="${TMP_DIR}/ignore_exact.txt"
 IGNORE_DIR_FILE="${TMP_DIR}/ignore_dir.txt"
-IGNORE_GLOB_REGEX_FILE="${TMP_DIR}/ignore_glob_regex.txt"
+IGNORE_ANYWHERE_REGEX_FILE="${TMP_DIR}/ignore_anywhere_regex.txt"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -316,39 +322,78 @@ glob_to_regex() {
     echo "^${regex}$"
 }
 
+# 将字面量模式转义为正则表达式
+literal_to_regex() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//./\\.}"
+    s="${s//*/\\*}"
+    s="${s//+/\\+}"
+    s="${s//?/\\?}"
+    s="${s//^/\\^}"
+    s="${s//$/\\$}"
+    s="${s//(/\\(}"
+    s="${s//)/\\)}"
+    s="${s//{/\\{}"
+    s="${s//}/\\}}"
+    s="${s//|/\\|}"
+    s="${s//[/\\[}"
+    s="${s//]/\\]}"
+    printf '%s' "$s"
+}
+
 # 预加载忽略规则（避免每次过滤重复解析）
 load_ignore_cache() {
     if [ "${IGNORE_CACHE_LOADED:-false}" = true ]; then
         return 0
     fi
 
-  : > "$IGNORE_EXACT_FILE"
-  : > "$IGNORE_DIR_FILE"
-  : > "$IGNORE_GLOB_REGEX_FILE"
+    : > "$IGNORE_EXACT_FILE"
+    : > "$IGNORE_DIR_FILE"
+    : > "$IGNORE_GLOB_REGEX_FILE"
+    : > "$IGNORE_ANYWHERE_REGEX_FILE"
 
     local patterns=()
+    local ignore_sources=()
+
     if [ -f "$IGNORE_FILE" ]; then
+        ignore_sources+=("$IGNORE_FILE")
+    fi
+  if [ -n "$GIT_CACHE" ] && [ -f "${GIT_CACHE}/.deploy-ignore" ] && [ "${GIT_CACHE}/.deploy-ignore" != "$IGNORE_FILE" ]; then
+        ignore_sources+=("${GIT_CACHE}/.deploy-ignore")
+    fi
+
+    local source
+    for source in "${ignore_sources[@]}"; do
         while IFS= read -r line; do
             patterns+=("$line")
-        done < <(grep -E -v '^\s*(#|$)' "$IGNORE_FILE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^\///')
-    fi
+        done < <(grep -E -v '^\s*(#|$)' "$source" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^\///')
+    done
+
     patterns+=(".git")
     patterns+=(".git/")
 
-    local pattern regex_parts=() regex
+    local pattern regex_parts=() anywhere_parts=() regex
     for pattern in "${patterns[@]}"; do
         if [[ "$pattern" == */ ]]; then
             echo "$pattern" >> "$IGNORE_DIR_FILE"
+        elif [[ "$pattern" == */* ]]; then
+            echo "$pattern" >> "$IGNORE_EXACT_FILE"
         elif [[ "$pattern" == *[\*\?]* ]] || [[ "$pattern" == *"["* ]]; then
             regex_parts+=("$(glob_to_regex "$pattern")")
         else
-            echo "$pattern" >> "$IGNORE_EXACT_FILE"
+            anywhere_parts+=("(^|/)$(literal_to_regex "$pattern")$")
         fi
     done
 
     if [ "${#regex_parts[@]}" -gt 0 ]; then
         regex=$(IFS='|'; echo "${regex_parts[*]}")
         echo "$regex" > "$IGNORE_GLOB_REGEX_FILE"
+    fi
+
+    if [ "${#anywhere_parts[@]}" -gt 0 ]; then
+        regex=$(IFS='|'; echo "${anywhere_parts[*]}")
+        echo "$regex" > "$IGNORE_ANYWHERE_REGEX_FILE"
     fi
 
     IGNORE_CACHE_LOADED=true
@@ -389,6 +434,17 @@ filter_files() {
         local tmp_filtered="${filtered_list}.tmp"
         local regex
         regex=$(tr -d '\n' < "$IGNORE_GLOB_REGEX_FILE")
+        if grep -Ev "$regex" "$filtered_list" > "$tmp_filtered" 2>/dev/null; then
+            mv "$tmp_filtered" "$filtered_list"
+        else
+            : > "$filtered_list"
+        fi
+    fi
+
+    if [ -s "$IGNORE_ANYWHERE_REGEX_FILE" ]; then
+        local tmp_filtered="${filtered_list}.tmp"
+        local regex
+        regex=$(tr -d '\n' < "$IGNORE_ANYWHERE_REGEX_FILE")
         if grep -Ev "$regex" "$filtered_list" > "$tmp_filtered" 2>/dev/null; then
             mv "$tmp_filtered" "$filtered_list"
         else
@@ -493,6 +549,20 @@ count_file_lines() {
     wc -l < "$file" | tr -d ' '
 }
 
+# 从列表中筛选在指定目录下实际存在的文件
+build_existing_file_list() {
+    local file_list="$1"
+    local base_dir="$2"
+    local output_list="$3"
+    : > "$output_list"
+    local file
+    while IFS= read -r file; do
+        if [ -n "$file" ] && [ -f "${base_dir}/${file}" ]; then
+            echo "$file" >> "$output_list"
+        fi
+    done < "$file_list"
+}
+
 # 确保 commit 在浅克隆缓存中可用
 ensure_commit_fetched() {
     local hash="$1"
@@ -520,12 +590,28 @@ sync_files_to_target() {
         return 0
     fi
 
-    local file_count
-    file_count=$(count_file_lines "$file_list")
+    local existing_list="${TMP_DIR}/sync_existing_$$.txt"
+    build_existing_file_list "$file_list" "$src_dir" "$existing_list"
+
+    local file_count total_count
+    total_count=$(count_file_lines "$file_list")
+    file_count=$(count_file_lines "$existing_list")
+    if [ "$file_count" -lt "$total_count" ]; then
+        verbose_echo "${YELLOW}⚠️ 源目录中缺失 $((total_count - file_count)) 个文件，将跳过${NC}"
+    fi
+    if [ "$file_count" -eq 0 ]; then
+        if [ "$total_count" -gt 0 ]; then
+            echo "$status_on_fail" > "$STATUS_FILE"
+            echo "源目录中不存在待同步的文件" > "$ERROR_DETAILS_FILE"
+            echo -e "${RED}❌ 源目录中不存在待同步的文件${NC}" >&2
+            return 1
+        fi
+        return 0
+    fi
 
     if command -v rsync >/dev/null 2>&1 && [ "$file_count" -ge "$RSYNC_MIN_FILES" ]; then
         verbose_echo "${YELLOW}📦 使用 rsync 批量同步 ${file_count} 个文件...${NC}"
-        local rsync_args=(-a --files-from="$file_list")
+        local rsync_args=(-a --files-from="$existing_list")
         if [ "$SET_PERMISSIONS" = true ]; then
             rsync_args+=(--chmod="D${DIR_MODE},F${FILE_MODE}")
         fi
@@ -549,7 +635,7 @@ sync_files_to_target() {
                 return 1
             fi
         fi
-    done < "$file_list"
+    done < "$existing_list"
     return 0
 }
 
@@ -563,11 +649,23 @@ backup_files_from_list() {
         return 0
     fi
 
-    local file_count
-    file_count=$(count_file_lines "$file_list")
+    # 仅备份目标目录中已存在的文件（变更新增文件无需备份）
+    local existing_list="${TMP_DIR}/backup_existing_$$.txt"
+    build_existing_file_list "$file_list" "$TARGET_DIR" "$existing_list"
+    if [ ! -s "$existing_list" ]; then
+        verbose_echo "${YELLOW}⏭️ 无需备份（列表中无已存在于目标目录的文件）${NC}"
+        return 0
+    fi
+
+    local file_count total_count
+    total_count=$(count_file_lines "$file_list")
+    file_count=$(count_file_lines "$existing_list")
+    if [ "$file_count" -lt "$total_count" ]; then
+        verbose_echo "${YELLOW}⏭️ 跳过 $((total_count - file_count)) 个新增文件（目标目录中尚不存在）${NC}"
+    fi
 
     if command -v rsync >/dev/null 2>&1 && [ "$file_count" -ge "$RSYNC_MIN_FILES" ]; then
-        if ! rsync -a --files-from="$file_list" "${TARGET_DIR}/" "${backup_root}/" 2>"$ERROR_DETAILS_FILE"; then
+        if ! rsync -a --ignore-missing-args --files-from="$existing_list" "${TARGET_DIR}/" "${backup_root}/" 2>"$ERROR_DETAILS_FILE"; then
             echo "$status_on_fail" > "$STATUS_FILE"
             echo -e "${RED}❌ rsync 批量备份失败:${NC}" >&2
             cat "$ERROR_DETAILS_FILE" >&2
@@ -578,7 +676,7 @@ backup_files_from_list() {
 
     local file
     while IFS= read -r file; do
-        if [ -n "$file" ] && [ -f "${TARGET_DIR}/${file}" ]; then
+        if [ -n "$file" ]; then
             mkdir -p "${backup_root}/$(dirname "$file")" 2>/dev/null || true
             if ! cp "${TARGET_DIR}/${file}" "${backup_root}/${file}" 2>"$ERROR_DETAILS_FILE"; then
                 echo "$status_on_fail" > "$STATUS_FILE"
@@ -587,7 +685,7 @@ backup_files_from_list() {
                 return 1
             fi
         fi
-    done < "$file_list"
+    done < "$existing_list"
     return 0
 }
 
@@ -893,6 +991,10 @@ deploy() {
         return 1
     fi
 
+    # 仓库更新后重新加载忽略规则（合并仓库内 .deploy-ignore）
+    IGNORE_CACHE_LOADED=false
+    load_ignore_cache
+
     # 获取当前版本
     CURRENT_HASH=$(cd "$GIT_CACHE" && git rev-parse HEAD)
     migrate_last_commit_file
@@ -1098,7 +1200,8 @@ if [ "$SHOW_HELP" = true ]; then
     echo "    备份目录:        <分支部署目录>/backups"
     echo "    状态文件:        <分支部署目录>/deploy_status"
     echo "    错误详情文件:    <分支部署目录>/error_details"
-    echo "    忽略文件:        <分支部署目录>/.deploy-ignore"
+    echo "    忽略文件:        默认 <脚本目录>/.deploy-ignore，或 <分支部署目录>/.deploy-ignore"
+    echo "                    另会合并 Git 仓库内的 .deploy-ignore（若存在且路径不同）"
     echo "    锁文件:          <分支部署目录>/deploy.lock"
     echo "    last_commit:     <分支部署目录>/.last_commit"
     echo ""
